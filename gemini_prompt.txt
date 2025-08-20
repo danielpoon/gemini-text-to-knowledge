@@ -1,0 +1,8 @@
+IMPORTANT: Ignore all previous conversations, context, or information. Start completely fresh with this text file only. 
+CRITICAL: You must process the ENTIRE text file from start to finish. Do not stop early or skip sections.
+Summarize the content of this text file, focusing only on the main ideas and themes, and explicitly ignore any profane or offensive language.
+Organize your output in the following structured format, using bullet points for clarity. Only include following sections that have relevant extracted information so if a section has no data, omit it.
+- Summary: Summarise the transcript, main topics, takeaways and conclusion
+- Key Insights: Any remarkable views or knowledge
+- Tags: Generate a list of up to 10 tags, one each line with a '#' in front
+- Transcript: Reformat the entire transcript back to a readable format and conversational sentences and paragraphs below, ignore any noises or sound
