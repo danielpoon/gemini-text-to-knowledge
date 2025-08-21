@@ -6,11 +6,13 @@ Processes text files using Google's Gemini AI and saves structured markdown outp
 
 import os
 import sys
+import time
 from pathlib import Path
 from typing import List, Tuple
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from dotenv import load_dotenv
+from better_profanity import profanity
 
 def load_environment() -> str:
     """Load environment variables and return API key."""
@@ -84,40 +86,143 @@ def get_safety_config():
         },
     ]
 
-def preprocess_content_for_safety(text_content: str) -> str:
-    """Preprocess content to reduce likelihood of content policy violations."""
-    # Remove or replace potentially problematic content
+def rate_limit_pause(seconds: int = None, show_progress: bool = True):
+    """Pause execution to avoid rate limiting."""
+    # Get pause duration from environment variable or use default
+    if seconds is None:
+        seconds = int(os.getenv('RATE_LIMIT_PAUSE', '60'))
+    
+    if show_progress:
+        print(f"Rate limiting: Pausing for {seconds} seconds to avoid API limits...")
+        for i in range(seconds, 0, -1):
+            if i % 10 == 0 or i <= 5:  # Show progress every 10 seconds and last 5 seconds
+                print(f"  Waiting... {i} seconds remaining")
+            time.sleep(1)
+        print("  Rate limit pause completed. Continuing...")
+    else:
+        time.sleep(seconds)
+
+def show_progress(current: int, total: int, success: int, failed: int, skipped: int):
+    """Show current progress statistics."""
+    processed = success + failed
+    remaining = total - processed - skipped
+    print(f"  Progress: {processed}/{total} files processed ({success} success, {failed} failed, {skipped} skipped, {remaining} remaining)")
+
+def load_custom_profanity_words() -> List[str]:
+    """Load custom profanity words from better_profanity.txt file."""
+    custom_words = []
+    profanity_file = Path('better_profanity.txt')
+    
+    if profanity_file.exists():
+        try:
+            with open(profanity_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    word = line.strip()
+                    if word and not word.startswith('#'):  # Skip empty lines and comments
+                        custom_words.append(word)
+            print(f"Loaded {len(custom_words)} custom profanity words from better_profanity.txt")
+        except Exception as e:
+            print(f"Warning: Could not load custom profanity words: {e}")
+    else:
+        print("No better_profanity.txt file found - using default profanity filter only")
+    
+    return custom_words
+
+def load_find_replace_patterns() -> List[Tuple[str, str]]:
+    """Load find and replace patterns from find_and_replace.txt file."""
+    patterns = []
+    find_replace_file = Path('find_and_replace.txt')
+    
+    if find_replace_file.exists():
+        try:
+            with open(find_replace_file, 'r', encoding='utf-8') as f:
+                for line_num, line in enumerate(f, 1):
+                    line = line.strip()
+                    if line and not line.startswith('#'):  # Skip empty lines and comments
+                        if '|' in line:
+                            find_word, replace_word = line.split('|', 1)
+                            patterns.append((find_word.strip(), replace_word.strip()))
+                        else:
+                            print(f"Warning: Line {line_num} in find_and_replace.txt missing pipe separator: {line}")
+            print(f"Loaded {len(patterns)} find/replace patterns from find_and_replace.txt")
+        except Exception as e:
+            print(f"Warning: Could not load find/replace patterns: {e}")
+    else:
+        print("No find_and_replace.txt file found - skipping additional word replacements")
+    
+    return patterns
+
+def preprocess_content_for_safety(text_content: str) -> Tuple[str, int, int]:
+    """Preprocess content to reduce likelihood of content policy violations.
+    
+    Returns:
+        Tuple of (processed_text, profanity_replacements, find_replace_replacements)
+    """
+    # Stage 1: Load custom profanity words and configure the filter
+    custom_words = load_custom_profanity_words()
+    
+    # Configure profanity filter with custom words
+    if custom_words:
+        profanity.load_censor_words(custom_words)
+        print(f"  Applied {len(custom_words)} custom profanity words to filter")
+    
+    # Process the text content
     processed = text_content
     
-    # Remove censored profanity completely
+    # Remove censored profanity placeholders
     processed = processed.replace('[ __ ]', '')
     processed = processed.replace('[__]', '')
     
-    # Remove common profanity patterns (case insensitive)
-    import re
+    # Check if we should completely remove profanity or use asterisks
+    remove_profanity_completely = os.getenv('REMOVE_PROFANITY_COMPLETELY', 'false').lower() == 'true'
     
-    # Common profanity words to remove (add more as needed)
-    profanity_patterns = [
-        r'\b\w*f\w*k\w*\b',  # f-word variations
-        r'\b\w*s\w*t\w*\b',  # s-word variations
-        r'\b\w*a\w*s\w*s\w*\b',  # a-word variations
-        r'\b\w*b\w*t\w*c\w*h\w*\b',  # b-word variations
-        r'\b\w*d\w*m\w*n\w*\b',  # d-word variations
-        r'\b\w*h\w*e\w*l\w*l\w*\b',  # h-word variations
-    ]
+    if remove_profanity_completely:
+        print(f"  Stage 1: Applying profanity filter (complete removal mode)...")
+        # Custom profanity removal that completely removes words
+        for word in custom_words:
+            import re
+            pattern = r'\b' + re.escape(word) + r'\b'
+            processed = re.sub(pattern, '', processed, flags=re.IGNORECASE)
+        
+        # Count profanity replacements (approximate based on original content)
+        profanity_replacements = sum(len(re.findall(r'\b' + re.escape(word) + r'\b', text_content, flags=re.IGNORECASE)) for word in custom_words)
+    else:
+        print(f"  Stage 1: Applying profanity filter (asterisk mode)...")
+        # Use better_profanity to censor profanity (replaces with asterisks)
+        processed = profanity.censor(processed)
+        
+        # Count profanity replacements by counting asterisks
+        profanity_replacements = processed.count('*')
     
-    for pattern in profanity_patterns:
-        processed = re.sub(pattern, '', processed, flags=re.IGNORECASE)
+    # Stage 2: Apply additional find/replace patterns
+    find_replace_patterns = load_find_replace_patterns()
+    find_replace_count = 0
+    if find_replace_patterns:
+        print(f"  Stage 2: Applying {len(find_replace_patterns)} find/replace patterns...")
+        for find_word, replace_word in find_replace_patterns:
+            # Use word boundaries to avoid partial matches
+            import re
+            pattern = r'\b' + re.escape(find_word) + r'\b'
+            # Count replacements for this pattern
+            matches = len(re.findall(pattern, processed, flags=re.IGNORECASE))
+            if matches > 0:
+                processed = re.sub(pattern, replace_word, processed, flags=re.IGNORECASE)
+                find_replace_count += matches
+                print(f"    Replaced {matches} instance(s) of '{find_word}' with '{replace_word}'")
     
     # Clean up extra whitespace and empty lines
-    processed = re.sub(r'\n\s*\n', '\n', processed)  # Remove empty lines
-    processed = re.sub(r' +', ' ', processed)  # Remove extra spaces
+    import re
+    processed = re.sub(r'\n\s*\n', '\n', processed)
+    processed = re.sub(r' +', ' ', processed)
     
-    # Add a note about content safety
-    safety_note = "\n\nNote: This transcript has been preprocessed for content safety. Profanity and potentially problematic content has been removed."
+    # Add safety note with replacement counts and mode
+    mode_description = "complete removal" if remove_profanity_completely else "asterisk masking"
+    safety_note = f"\n\nNote: This transcript has been preprocessed for content safety using a two-stage approach:\n1. Profanity filtering with {mode_description}: {profanity_replacements} replacements\n2. Additional word replacements from find_and_replace.txt: {find_replace_count} replacements"
     processed += safety_note
     
-    return processed
+    print(f"  Content safety summary: {profanity_replacements} profanity replacements ({mode_description}), {find_replace_count} find/replace replacements")
+    
+    return processed, profanity_replacements, find_replace_count
 
 def query_api_models(api_key: str) -> List[str]:
     """Query the Gemini API to get actually available models."""
@@ -240,16 +345,32 @@ def process_text_with_gemini(model: genai.GenerativeModel, prompt: str, text_con
             
     except Exception as e:
         error_msg = str(e)
+        error_type = type(e).__name__
+        
         if "violation" in error_msg.lower():
-            return "Error: Content policy violation - The content may contain language or topics that violate Gemini's safety policies. Consider:\n- Removing profanity or offensive language\n- Focusing on factual analysis rather than opinions\n- Avoiding specific financial advice\n- Using more professional language"
+            # Enhanced violation error with full Gemini message
+            full_error = f"""Error: Content policy violation - The content may contain language or topics that violate Gemini's safety policies.
+
+FULL GEMINI ERROR MESSAGE:
+{error_type}: {error_msg}
+
+RECOMMENDATIONS:
+- Remove profanity or offensive language
+- Focus on factual analysis rather than opinions
+- Avoid specific financial advice
+- Use more professional language
+- Check the full error message above for specific violation details
+
+This detailed error information can help you identify exactly what content is causing the policy violation."""
+            return full_error
         elif "501" in error_msg.lower():
-            return "Error: Service unavailable (501)"
+            return f"Error: Service unavailable (501)\n\nFull error: {error_type}: {error_msg}"
         elif "quota" in error_msg.lower():
-            return "Error: API quota exceeded - You may have reached your daily limit"
+            return f"Error: API quota exceeded - You may have reached your daily limit\n\nFull error: {error_type}: {error_msg}"
         elif "rate" in error_msg.lower():
-            return "Error: Rate limit exceeded - Please wait before trying again"
+            return f"Error: Rate limit exceeded - Please wait before trying again\n\nFull error: {error_type}: {error_msg}"
         else:
-            return f"Error: {error_msg}"
+            return f"Error: {error_type}: {error_msg}"
 
 def save_output(content: str, filename: str) -> bool:
     """Save processed content to output directory."""
@@ -271,19 +392,45 @@ def save_output(content: str, filename: str) -> bool:
         return False
 
 def format_markdown_sections(content: str) -> str:
-    """Format content with bold section headers."""
+    """Format content with bold section headers, avoiding duplicate formatting."""
     lines = content.split('\n')
     formatted_lines = []
     
     for line in lines:
         line = line.strip()
+        
+        # Skip empty lines
+        if not line:
+            formatted_lines.append(line)
+            continue
+            
+        # Check if line already has markdown formatting
+        if line.startswith('**') and line.endswith('**'):
+            # Already bold formatted, keep as is
+            formatted_lines.append(line)
+            continue
+            
+        # Check if line already has asterisks (partial markdown)
+        if '**' in line:
+            # Already has some markdown, keep as is
+            formatted_lines.append(line)
+            continue
+            
+        # Check if line is a section header that needs formatting
         if line.startswith('-') and ':' in line:
-            # Bold the section headers
             section_name = line.split(':')[0].strip('- ')
-            formatted_lines.append(f"**{section_name}:**")
-            if ':' in line:
-                formatted_lines.append(line.split(':', 1)[1].strip())
+            section_content = line.split(':', 1)[1].strip() if ':' in line else ''
+            
+            # Only add bold if section name doesn't already have it
+            if not section_name.startswith('**') and not section_name.endswith('**'):
+                formatted_lines.append(f"**{section_name}:**")
+                if section_content:
+                    formatted_lines.append(section_content)
+            else:
+                # Already formatted, keep original
+                formatted_lines.append(line)
         else:
+            # Regular line, keep as is
             formatted_lines.append(line)
     
     return '\n'.join(formatted_lines)
@@ -315,6 +462,11 @@ def main():
         print("  --test-safety      Test content preprocessing for safety")
         print("  --show-models      Force show detailed model list")
         print("  --test-safety-config Test safety configuration settings")
+        print("  --test-markdown      Test markdown formatting logic")
+        print("  --test-rate-limit    Test rate limiting functionality")
+        print("  --test-profanity     Test profanity filtering functionality")
+        print("  --test-profanity-removal Test profanity filtering with complete removal")
+        print("  --test-error-handling    Test enhanced error handling and messages")
         print()
         print("Known Gemini models (API will be queried for actual availability):")
         for model in get_available_models():
@@ -328,6 +480,8 @@ def main():
         print("  OUTPUT_DIR          Output directory (default: output)")
         print("  INPUT_DIR           Input directory (default: input)")
         print("  SHOW_MODEL_LIST     Show detailed model list (default: false)")
+        print("  RATE_LIMIT_PAUSE    Pause duration in seconds (default: 60)")
+        print("  DISABLE_RATE_LIMIT  Disable rate limiting (default: false)")
         return
     
     # Check for models argument
@@ -487,6 +641,214 @@ Buy this stock now for massive profits!"""
             print(f"Error testing safety config: {e}")
         return
     
+    # Check for test-markdown argument
+    if len(sys.argv) > 1 and sys.argv[1] == '--test-markdown':
+        print("Testing markdown formatting logic...")
+        print()
+        
+        # Test content with various formatting scenarios
+        test_content = """- Trading Date: August 18, 2025
+- Main Topic: Stock market analysis
+**Already Bold Section:** This is already formatted
+- Risk Management: Stop loss strategies
+- **Partially Bold:** Mixed formatting
+- Technical Indicators: RSI, MACD, EMA
+
+Regular text line
+Another regular line"""
+        
+        print("Original content:")
+        print("-" * 40)
+        print(test_content)
+        print("-" * 40)
+        print()
+        
+        print("Formatted content:")
+        print("-" * 40)
+        formatted_content = format_markdown_sections(test_content)
+        print(formatted_content)
+        print("-" * 40)
+        print()
+        
+        print("Formatting decisions made:")
+        print("- Lines starting with '-' and ':' get bold formatting")
+        print("- Lines already containing '**' are preserved as-is")
+        print("- Lines already starting/ending with '**' are preserved")
+        print("- Regular text lines are unchanged")
+        return
+    
+    # Check for test-rate-limit argument
+    if len(sys.argv) > 1 and sys.argv[1] == '--test-rate-limit':
+        print("Testing rate limiting functionality...")
+        print()
+        
+        # Test different pause durations
+        test_durations = [5, 10, 15]  # Short durations for testing
+        
+        for duration in test_durations:
+            print(f"Testing {duration} second pause:")
+            rate_limit_pause(duration)
+            print()
+        
+        print("Rate limiting test completed!")
+        print()
+        print("Environment variables for rate limiting:")
+        print("- RATE_LIMIT_PAUSE: Pause duration in seconds (default: 60)")
+        print("- DISABLE_RATE_LIMIT: Set to 'true' to disable rate limiting")
+        return
+    
+    # Check for test-profanity argument
+    if len(sys.argv) > 1 and sys.argv[1] == '--test-profanity':
+        print("Testing two-stage profanity filtering functionality...")
+        print()
+        
+        # Test text with various profanity and words from find_and_replace.txt
+        test_text = """This is a test transcript with some content.
+        
+        The speaker said some shitty things about the situation.
+        They also mentioned [ __ ] and [__] off.
+        There was some no [ __ ] in there too.
+        
+        The content also contains some regular profanity like damn and hell.
+        The person is a loser and the situation sucks.
+        They were bullied by communists and called an idiot.
+        The piece of work was crap and they are suckers."""
+        
+        print("Original text:")
+        print("-" * 40)
+        print(test_text)
+        print("-" * 40)
+        print()
+        
+        print("After two-stage filtering:")
+        print("-" * 40)
+        filtered_text, profanity_count, find_replace_count = preprocess_content_for_safety(test_text)
+        print(filtered_text)
+        print("-" * 40)
+        print()
+        
+        print(f"Replacement Summary:")
+        print(f"  Profanity replacements: {profanity_count}")
+        print(f"  Find/replace replacements: {find_replace_count}")
+        print(f"  Total replacements: {profanity_count + find_replace_count}")
+        print()
+        
+        print("Two-stage filtering test completed!")
+        print()
+        print("Custom profanity words loaded from better_profanity.txt:")
+        custom_words = load_custom_profanity_words()
+        if custom_words:
+            for word in custom_words:
+                print(f"  - {word}")
+        else:
+            print("  No custom words found")
+        
+        print()
+        print("Find/replace patterns loaded from find_and_replace.txt:")
+        find_replace_patterns = load_find_replace_patterns()
+        if find_replace_patterns:
+            for find_word, replace_word in find_replace_patterns:
+                print(f"  - '{find_word}' → '{replace_word}'")
+        else:
+            print("  No patterns found")
+        return
+    
+    # Check for test-profanity-removal argument
+    if len(sys.argv) > 1 and sys.argv[1] == '--test-profanity-removal':
+        print("Testing profanity filtering with COMPLETE REMOVAL mode...")
+        print()
+        
+        # Set environment variable for complete removal
+        os.environ['REMOVE_PROFANITY_COMPLETELY'] = 'true'
+        
+        # Test text with various profanity and words from find_and_replace.txt
+        test_text = """This is a test transcript with some content.
+        
+        The speaker said some shitty things about the situation.
+        They also mentioned [ __ ] and [__] off.
+        There was some no [ __ ] in there too.
+        
+        The content also contains some regular profanity like damn and hell.
+        The person is a loser and the situation sucks.
+        They were bullied by communists and called an idiot.
+        The piece of work was crap and they are suckers."""
+        
+        print("Original text:")
+        print("-" * 40)
+        print(test_text)
+        print("-" * 40)
+        print()
+        
+        print("After two-stage filtering (COMPLETE REMOVAL mode):")
+        print("-" * 40)
+        filtered_text, profanity_count, find_replace_count = preprocess_content_for_safety(test_text)
+        print(filtered_text)
+        print("-" * 40)
+        print()
+        
+        print(f"Replacement Summary (Complete Removal Mode):")
+        print(f"  Profanity completely removed: {profanity_count}")
+        print(f"  Find/replace replacements: {find_replace_count}")
+        print(f"  Total replacements: {profanity_count + find_replace_count}")
+        print()
+        
+        print("Complete removal test completed!")
+        print()
+        print("To use complete removal mode, set in your .env file:")
+        print("  REMOVE_PROFANITY_COMPLETELY=true")
+        return
+    
+    # Check for test-error-handling argument
+    if len(sys.argv) > 1 and sys.argv[1] == '--test-error-handling':
+        print("Testing enhanced error handling and messages...")
+        print()
+        
+        # Simulate different types of errors
+        print("1. Content Policy Violation Error:")
+        print("-" * 40)
+        violation_error = """Error: Content policy violation - The content may contain language or topics that violate Gemini's safety policies.
+
+FULL GEMINI ERROR MESSAGE:
+BlockedPromptException: The prompt was blocked because it contains content that may violate our content policy. This includes content that may be harmful, inappropriate, or violate our safety guidelines.
+
+RECOMMENDATIONS:
+- Remove profanity or offensive language
+- Focus on factual analysis rather than opinions
+- Avoid specific financial advice
+- Use more professional language
+- Check the full error message above for specific violation details
+
+This detailed error information can help you identify exactly what content is causing the policy violation."""
+        print(violation_error)
+        print()
+        
+        print("2. Service Unavailable Error (501):")
+        print("-" * 40)
+        service_error = "Error: Service unavailable (501)\n\nFull error: HTTPException: 501 Not Implemented"
+        print(service_error)
+        print()
+        
+        print("3. Quota Exceeded Error:")
+        print("-" * 40)
+        quota_error = "Error: API quota exceeded - You may have reached your daily limit\n\nFull error: QuotaExceededException: Daily quota limit exceeded"
+        print(quota_error)
+        print()
+        
+        print("4. Rate Limit Error:")
+        print("-" * 40)
+        rate_error = "Error: Rate limit exceeded - Please wait before trying again\n\nFull error: RateLimitException: Too many requests per minute"
+        print(rate_error)
+        print()
+        
+        print("Enhanced error handling test completed!")
+        print()
+        print("Benefits of enhanced error messages:")
+        print("- Full Gemini error details for debugging")
+        print("- Specific error types and messages")
+        print("- Clear recommendations for resolution")
+        print("- Better understanding of content policy violations")
+        return
+    
     # Check for show-models argument
     if len(sys.argv) > 1 and sys.argv[1] == '--show-models':
         try:
@@ -565,7 +927,7 @@ Buy this stock now for massive profits!"""
             
             # Preprocess content for safety
             print(f"  Preprocessing content for safety...")
-            safe_content = preprocess_content_for_safety(text_content)
+            safe_content, profanity_count, find_replace_count = preprocess_content_for_safety(text_content)
             
             # Process with Gemini
             response = process_text_with_gemini(model, prompt, safe_content)
@@ -573,23 +935,51 @@ Buy this stock now for massive profits!"""
             # Check if processing was successful
             if response.startswith('Error:'):
                 print(f"  Failed: {response}")
+                print(f"  Content safety: {profanity_count} profanity + {find_replace_count} find/replace = {profanity_count + find_replace_count} total replacements")
                 update_tracking_files(filename, False)
                 processed_failed += 1
+                # Show progress after failed processing
+                show_progress(processed_success + processed_failed, total_files, processed_success, processed_failed, skipped)
             else:
                 # Save output
                 if save_output(response, filename):
                     print(f"  Success: Saved to output/{txt_file.stem}.md")
+                    print(f"  Content safety: {profanity_count} profanity + {find_replace_count} find/replace = {profanity_count + find_replace_count} total replacements")
                     update_tracking_files(filename, True)
                     processed_success += 1
+                    # Show progress after successful processing
+                    show_progress(processed_success + processed_failed, total_files, processed_success, processed_failed, skipped)
                 else:
                     print(f"  Failed: Could not save output")
+                    print(f"  Content safety: {profanity_count} profanity + {find_replace_count} find/replace = {profanity_count + find_replace_count} total replacements")
                     update_tracking_files(filename, False)
                     processed_failed += 1
+                    # Show progress after failed processing
+                    show_progress(processed_success + processed_failed, total_files, processed_success, processed_failed, skipped)
+            
+            # Rate limiting pause after each file (except the last one)
+            if txt_file != txt_files[-1]:  # Don't pause after the last file
+                # Check if rate limiting is enabled
+                if os.getenv('DISABLE_RATE_LIMIT', 'false').lower() != 'true':
+                    rate_limit_pause()
+                else:
+                    print("  Rate limiting disabled - continuing immediately")
                     
         except Exception as e:
             print(f"  Error processing {filename}: {e}")
+            print(f"  Content safety: {profanity_count} profanity + {find_replace_count} find/replace = {profanity_count + find_replace_count} total replacements")
             update_tracking_files(filename, False)
             processed_failed += 1
+            # Show progress after exception
+            show_progress(processed_success + processed_failed, total_files, processed_success, processed_failed, skipped)
+            
+            # Rate limiting pause even after errors (except the last file)
+            if txt_file != txt_files[-1]:  # Don't pause after the last file
+                # Check if rate limiting is enabled
+                if os.getenv('DISABLE_RATE_LIMIT', 'false').lower() != 'true':
+                    rate_limit_pause()
+                else:
+                    print("  Rate limiting disabled - continuing immediately")
     
     # Print summary
     print("\n" + "=" * 40)
