@@ -54,6 +54,15 @@ A Python script that processes one or more text files using Google's Gemini AI t
    - Configure find/replace patterns in `find_and_replace.txt`
    - Set environment variables for filtering behavior
 
+5. **Verify your installation:**
+   
+   ```bash
+   source .venv/bin/activate
+   python3 test_setup.py
+   ```
+   
+   This will check that all dependencies are installed and directories are properly configured.
+
 ## Directory Structure
 
 ```
@@ -71,14 +80,21 @@ gemini-text-to-knowledge/
 
 ## Usage
 
-1. Place your text files in the `input/` directory
-
-2. Customize the prompt in `gemini_prompt.txt` if needed
-
-3. Run the script:
+1. **Verify your setup first:**
    
    ```bash
-   python gemini_text_to_knowledge.py
+   source .venv/bin/activate
+   python3 test_setup.py
+   ```
+
+2. Place your text files in the `input/` directory
+
+3. Customize the prompt in `gemini_prompt.txt` if needed
+
+4. Run the script:
+   
+   ```bash
+   python3 gemini_text_to_knowledge.py
    ```
 
 ## How It Works
@@ -135,6 +151,37 @@ SHOW_MODEL_LIST=false              # true = show detailed model list, false = su
 ### Output Format
 
 The script automatically formats AI responses with bold section headers. Modify the `format_markdown_sections()` function to customize the output formatting.
+
+## Testing and Verification
+
+### Run Setup Test
+Before processing files, verify your installation:
+```bash
+source .venv/bin/activate
+python3 test_setup.py
+```
+
+This test will:
+- Check that all required Python packages are installed
+- Verify that required directories exist (`input/`, `output/`)
+- Confirm that configuration files are present
+- Test basic functionality
+
+### Test Individual Components
+The script includes several test modes for debugging:
+```bash
+# Test API connection
+python3 gemini_text_to_knowledge.py --test-api
+
+# Test content filtering
+python3 gemini_text_to_knowledge.py --test-profanity
+
+# Test error handling
+python3 gemini_text_to_knowledge.py --test-error-handling
+
+# View all available test options
+python3 gemini_text_to_knowledge.py --help
+```
 
 ## Troubleshooting
 
