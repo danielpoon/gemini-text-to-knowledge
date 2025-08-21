@@ -23,6 +23,9 @@ A Python script that processes one or more text files using Google's Gemini AI t
 - Skips already processed files to avoid duplication
 - Comprehensive error handling and logging
 - Configurable prompt system
+- **Two-stage content filtering system for safety compliance**
+- **Customizable profanity filtering with better_profanity library**
+- **Configurable find/replace patterns for content modification**
 
 ## Prerequisites
 
@@ -45,6 +48,12 @@ A Python script that processes one or more text files using Google's Gemini AI t
    - Create a `.env` file in the project root
    - Add your API key: `GOOGLE_API_KEY=your_actual_api_key_here`
 
+4. **Set up content filtering (optional but recommended):**
+   
+   - Customize profanity words in `better_profanity.txt`
+   - Configure find/replace patterns in `find_and_replace.txt`
+   - Set environment variables for filtering behavior
+
 ## Directory Structure
 
 ```
@@ -52,6 +61,8 @@ gemini-text-to-knowledge/
 ├── input/                   # Input text files directory
 ├── output/                  # Generated markdown files
 ├── gemini_prompt.txt        # Custom prompt for Gemini AI
+├── better_profanity.txt     # Custom profanity words for content filtering
+├── find_and_replace.txt     # Custom find/replace patterns for content safety
 ├── gemini_text_to_knowledge.py  # Main processing script
 ├── requirements.txt         # Python dependencies
 ├── .gitignore              # Git ignore rules
@@ -72,12 +83,13 @@ gemini-text-to-knowledge/
 
 ## How It Works
 
-1. **File Discovery**: Scans the `data/` directory for `.txt` files
-2. **Prompt Loading**: Reads the custom prompt from `gemini_prompt.txt`
-3. **Processing**: Sends each text file to Gemini AI with the prompt
-4. **Output Generation**: Converts AI responses to markdown format
-5. **File Saving**: Saves processed content to `output/` directory
-6. **Tracking**: Maintains logs of successful and failed processing
+1. **File Discovery**: Scans the `input/` directory for `.txt` files
+2. **Content Preprocessing**: Applies two-stage content filtering for safety compliance
+3. **Prompt Loading**: Reads the custom prompt from `gemini_prompt.txt`
+4. **Processing**: Sends each filtered text file to Gemini AI with the prompt
+5. **Output Generation**: Converts AI responses to markdown format
+6. **File Saving**: Saves processed content to `output/` directory
+7. **Tracking**: Maintains logs of successful and failed processing
 
 ## Output Files
 
@@ -100,6 +112,26 @@ The script handles various error scenarios:
 
 Edit `gemini_prompt.txt` to change how Gemini AI processes your text files. The current prompt is designed for stock trading transcript analysis but can be adapted for any domain.
 
+### Content Filtering Configuration
+
+#### Profanity Filtering
+- **File**: `better_profanity.txt` - Add one profanity word per line
+- **Behavior**: Set `REMOVE_PROFANITY_COMPLETELY=true` in `.env` to completely remove words, or `false` (default) to mask with asterisks
+- **Example**: Add words like "damn", "hell", "crap" to the file
+
+#### Find/Replace Patterns
+- **File**: `find_and_replace.txt` - Use format: `find_word|replace_word`
+- **Behavior**: Case-insensitive replacement of specific terms
+- **Example**: `loser|losing position`, `bullied|forced`
+
+#### Environment Variables
+```bash
+REMOVE_PROFANITY_COMPLETELY=false  # true = remove completely, false = mask with ****
+RATE_LIMIT_PAUSE=60                # seconds to pause between API calls
+DISABLE_RATE_LIMIT=false           # true = no pause, false = use pause
+SHOW_MODEL_LIST=false              # true = show detailed model list, false = summary only
+```
+
 ### Output Format
 
 The script automatically formats AI responses with bold section headers. Modify the `format_markdown_sections()` function to customize the output formatting.
@@ -109,20 +141,26 @@ The script automatically formats AI responses with bold section headers. Modify 
 ### Common Issues
 
 1. **API Key Error**: Ensure your `.env` file contains a valid `GOOGLE_API_KEY`
-2. **No Files Found**: Check that your `data/` directory contains `.txt` files
+2. **No Files Found**: Check that your `input/` directory contains `.txt` files
 3. **Permission Errors**: Ensure the script has read/write permissions for all directories
+4. **Module Import Error**: Activate the virtual environment before running: `source .venv/bin/activate`
+5. **Content Policy Violations**: Check that content filtering is properly configured in `better_profanity.txt` and `find_and_replace.txt`
 
 ### API Limits
 
 - Be aware of Google AI API rate limits and quotas
 - Large text files may take longer to process
 - Consider processing files in smaller batches if needed
+- **Rate Limiting**: Script includes configurable pauses between API calls (default: 60 seconds)
+- **Content Safety**: Two-stage filtering helps prevent content policy violations
 
 ## Dependencies
 
 - `google-generativeai`: Google's official Gemini AI Python library
 - `python-dotenv`: Environment variable management
-- Standard Python libraries: `os`, `sys`, `pathlib`, `typing`
+- `better-profanity`: Content filtering and profanity detection
+- `urllib3<2.0.0`: HTTP client library (compatible with LibreSSL)
+- Standard Python libraries: `os`, `sys`, `pathlib`, `typing`, `re`
 
 ## License
 
